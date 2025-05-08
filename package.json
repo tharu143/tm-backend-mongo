@@ -4,7 +4,8 @@
   "description": "Backend for TMCyberTech",
   "main": "index.js",
   "scripts": {
-    "start": "netlify dev"
+    "start": "netlify dev",
+    "build": "npm install && echo 'Preparing Netlify Functions' && ls netlify/functions"
   },
   "dependencies": {
     "bcrypt": "^5.1.1",
