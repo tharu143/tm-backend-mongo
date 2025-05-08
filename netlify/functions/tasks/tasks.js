@@ -1,4 +1,4 @@
-const { Pool } = require('@neondatabase/serverless');
+const { MongoClient } = require('mongodb');
 const jwt = require('jsonwebtoken');
 
 exports.handler = async function (event, context) {
@@ -37,22 +37,27 @@ exports.handler = async function (event, context) {
     };
   }
 
-  const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-  });
-
+  const client = new MongoClient(process.env.MONGODB_URI);
   try {
+    await client.connect();
+    const db = client.db();
+
     if (event.httpMethod === 'GET') {
-      const result = await pool.query(`
-        SELECT t.*, e.name AS employee_name
-        FROM tasks t
-        JOIN employees e ON t.employee_id = e.id
-        ORDER BY t.created_at DESC
-      `);
+      const tasks = await db.collection('tasks')
+        .find({})
+        .sort({ created_at: -1 })
+        .toArray();
       return {
         statusCode: 200,
         headers,
-        body: JSON.stringify(result.rows),
+        body: JSON.stringify(tasks.map(task => ({
+          id: task._id.toString(),
+          title: task.title,
+          description: task.description,
+          status: task.status,
+          due_date: task.due_date,
+          created_at: task.created_at,
+        }))),
       };
     } else if (event.httpMethod === 'POST') {
       let body;
@@ -66,23 +71,33 @@ exports.handler = async function (event, context) {
         };
       }
 
-      const { employee_id, title, description, status, due_date } = body;
-      if (!employee_id || !title || !description || !status || !due_date) {
+      const { title, description, status, due_date } = body;
+      if (!title || !status || !due_date) {
         return {
           statusCode: 400,
           headers,
-          body: JSON.stringify({ error: 'All fields are required' }),
+          body: JSON.stringify({ error: 'Title, status, and due date are required' }),
         };
       }
 
-      const result = await pool.query(
-        'INSERT INTO tasks (employee_id, title, description, status, due_date) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-        [employee_id, title, description, status, due_date]
-      );
+      const newTask = {
+        title,
+        description: description || '',
+        status,
+        due_date: new Date(due_date),
+        created_at: new Date(),
+      };
+
+      const result = await db.collection('tasks').insertOne(newTask);
+      const insertedTask = {
+        id: result.insertedId.toString(),
+        ...newTask,
+      };
+
       return {
         statusCode: 201,
         headers,
-        body: JSON.stringify(result.rows[0]),
+        body: JSON.stringify(insertedTask),
       };
     } else {
       return {
@@ -99,6 +114,6 @@ exports.handler = async function (event, context) {
       body: JSON.stringify({ error: 'Internal server error' }),
     };
   } finally {
-    await pool.end();
+    await client.close();
   }
 };

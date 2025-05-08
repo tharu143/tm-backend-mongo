@@ -1,4 +1,4 @@
-const { Pool } = require('@neondatabase/serverless');
+const { MongoClient, ObjectId } = require('mongodb');
 const jwt = require('jsonwebtoken');
 
 exports.handler = async function (event, context) {
@@ -37,10 +37,6 @@ exports.handler = async function (event, context) {
     };
   }
 
-  const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-  });
-
   const { id } = event.queryStringParameters || {};
 
   if (!id) {
@@ -51,25 +47,55 @@ exports.handler = async function (event, context) {
     };
   }
 
+  const client = new MongoClient(process.env.MONGODB_URI);
   try {
+    await client.connect();
+    const db = client.db();
+
     if (event.httpMethod === 'GET') {
-      const result = await pool.query(`
-        SELECT t.*, e.name AS employee_name
-        FROM tasks t
-        JOIN employees e ON t.employee_id = e.id
-        WHERE t.id = $1
-      `, [id]);
-      if (!result.rows[0]) {
+      const task = await db.collection('tasks')
+        .aggregate([
+          { $match: { _id: new ObjectId(id) } },
+          {
+            $lookup: {
+              from: 'employees',
+              localField: 'employee_id',
+              foreignField: '_id',
+              as: 'employee',
+            },
+          },
+          { $unwind: '$employee' },
+          {
+            $project: {
+              id: '$_id',
+              employee_id: '$employee_id',
+              employee_name: '$employee.name',
+              title: '$title',
+              description: '$description',
+              status: '$status',
+              due_date: '$due_date',
+              created_at: '$created_at',
+            },
+          },
+        ])
+        .toArray();
+
+      if (!task[0]) {
         return {
           statusCode: 404,
           headers,
           body: JSON.stringify({ error: 'Task not found' }),
         };
       }
+
       return {
         statusCode: 200,
         headers,
-        body: JSON.stringify(result.rows[0]),
+        body: JSON.stringify({
+          ...task[0],
+          id: task[0].id.toString(),
+          employee_id: task[0].employee_id.toString(),
+        }),
       };
     } else if (event.httpMethod === 'PUT') {
       let body;
@@ -92,25 +118,55 @@ exports.handler = async function (event, context) {
         };
       }
 
-      const result = await pool.query(
-        'UPDATE tasks SET employee_id = $1, title = $2, description = $3, status = $4, due_date = $5 WHERE id = $6 RETURNING *',
-        [employee_id, title, description, status, due_date, id]
-      );
-      if (!result.rows[0]) {
+      const employee = await db.collection('employees').findOne({ _id: new ObjectId(employee_id) });
+      if (!employee) {
+        return {
+          statusCode: 404,
+          headers,
+          body: JSON.stringify({ error: 'Employee not found' }),
+        };
+      }
+
+      const updateFields = {
+        employee_id: new ObjectId(employee_id),
+        title,
+        description,
+        status,
+        due_date: new Date(due_date),
+      };
+
+      const result = await db.collection('tasks')
+        .findOneAndUpdate(
+          { _id: new ObjectId(id) },
+          { $set: updateFields },
+          { returnDocument: 'after' }
+        );
+
+      if (!result.value) {
         return {
           statusCode: 404,
           headers,
           body: JSON.stringify({ error: 'Task not found' }),
         };
       }
+
       return {
         statusCode: 200,
         headers,
-        body: JSON.stringify(result.rows[0]),
+        body: JSON.stringify({
+          id: result.value._id.toString(),
+          employee_id: result.value.employee_id.toString(),
+          employee_name: employee.name,
+          title: result.value.title,
+          description: result.value.description,
+          status: result.value.status,
+          due_date: result.value.due_date,
+          created_at: result.value.created_at,
+        }),
       };
     } else if (event.httpMethod === 'DELETE') {
-      const result = await pool.query('DELETE FROM tasks WHERE id = $1 RETURNING id', [id]);
-      if (!result.rows[0]) {
+      const result = await db.collection('tasks').deleteOne({ _id: new ObjectId(id) });
+      if (result.deletedCount === 0) {
         return {
           statusCode: 404,
           headers,
@@ -137,6 +193,6 @@ exports.handler = async function (event, context) {
       body: JSON.stringify({ error: 'Internal server error' }),
     };
   } finally {
-    await pool.end();
+    await client.close();
   }
 };
